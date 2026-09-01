@@ -8,7 +8,7 @@ node.
 
 Qwen3.8-Flash-Next NVFP4 fits one Spark at 79.42 GiB resident, with 47.7 GiB of PLE table
 memory-mapped from NVMe. Sharding it would buy no memory and cost cross-node collectives on
-a fabric measured at 13.7 GB/s per rail against roughly 273 GB/s of local memory.
+a fabric measured at 24.6 GB/s per neighbour against roughly 273 GB/s of local memory.
 
 Even if you wanted to, the arithmetic forbids TP3:
 

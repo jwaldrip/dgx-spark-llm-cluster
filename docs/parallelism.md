@@ -77,13 +77,13 @@ operation.
 Prefill, not decode. At `--max-num-batched-tokens 8192`, a 262,144-token prompt is 32 chunks:
 
 ```text
-exposed wire, single rail    14.1 s
-exposed wire, bonded         7.9 s
+exposed wire, one netdev      14.1 s
+exposed wire, both functions   7.9 s
 ```
 
 That is wire time if unhidden by compute overlap, so treat it as an upper bound. Cross-checked
 against a reported two-node TTFT of about 6.6 s at 16K tokens warm, wire accounts for roughly
-13% of TTFT single rail and 7% bonded.
+13% of TTFT on one netdev and 7% using both.
 
-**So rail bonding is a prefill optimization.** If your prompts are long, it is worth the
-verification effort. If your bottleneck is generation speed, it is not.
+**So using both port functions is a prefill optimization.** If your prompts are long it is
+worth configuring. If your bottleneck is generation speed, it is not.

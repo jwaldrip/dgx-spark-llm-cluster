@@ -31,18 +31,23 @@ disk       3.7 TB NVMe
 docker     29.2.1
 ```
 
-Interconnect, measured with `ib_write_bw` at 1 MiB messages:
+Interconnect, measured with `ib_write_bw` at 1 MiB messages. Three cables, one per adjacent
+pair, and **each cable presents two netdevs** because each physical port is exposed across
+two PCIe domains:
 
 ```text
-single rail                     109.12 Gb/s
-single rail, RoCE MTU 4096      109.27 Gb/s
-single rail, 8 queue pairs      111.86 Gb/s
-both rails concurrently          98.28 Gb/s each  =  196.55 Gb/s
+one netdev                      109.12 Gb/s
+one netdev, RoCE MTU 4096       109.27 Gb/s
+one netdev, 8 queue pairs       111.86 Gb/s
+both netdevs of the same port    98.28 Gb/s each  =  196.55 Gb/s
 ```
 
-**About 110 Gb/s is a hard per-link ceiling, roughly 55% of the 200 Gb/s nominal link
-speed.** Neither jumbo frames nor queue-pair count move it. Both rails together nearly
-double it. See [docs/interconnect.md](docs/interconnect.md).
+**Roughly 110 Gb/s is a per-PCIe-function ceiling, not a link ceiling.** Neither jumbo
+frames nor queue-pair count move it. Drive both functions of the port and one cable delivers
+196.55 Gb/s, about 98% of its 200 Gb/s line rate, or 24.6 GB/s per neighbour.
+
+Every published recipe, NVIDIA's included, pins a single interface and therefore uses half
+of each cable. See [docs/interconnect.md](docs/interconnect.md).
 
 GLM-5.3-Flash at tensor parallel 2, live:
 
@@ -85,8 +90,8 @@ prefix cache hit rate     87.7%   over 22.4M queries
 - Speculative decoding. The published 46.9 tok/s for GLM on two Sparks depends on a
   DFlash2 drafter. These launchers run without it. Reported throughput without speculative
   decoding is 14.3 tok/s, which is slower than the single-node Qwen worker.
-- Rail bonding. The hardware sustains 196.55 Gb/s across both rails, but nothing here
-  proves NCCL engages both on a two-rank job.
+- Driving both PCIe functions of a port from NCCL. The hardware sustains 196.55 Gb/s on one
+  cable, but nothing here proves NCCL engages both functions on a two-rank job.
 - Any quality comparison between the two models. That work is separate and is not in this
   repo yet.
 

@@ -5,7 +5,7 @@
 #
 # Why data parallel and not tensor parallel. The model fits one node at 79.42 GiB resident,
 # so sharding it buys nothing and costs cross-node collectives on a fabric measured at
-# 13.7 GB/s per rail against roughly 273 GB/s of local memory. And TP3 is not even legal
+# 24.6 GB/s per neighbour against roughly 273 GB/s of local memory. And TP3 is not even legal
 # for this checkpoint:
 #
 #     num_attention_heads   24     /3 = 8       ok
