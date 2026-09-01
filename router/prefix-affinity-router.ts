@@ -29,7 +29,7 @@ const PORT = Number(process.env.ROUTER_PORT ?? 18010);
 const MAX_INFLIGHT = Number(process.env.ROUTER_MAX_INFLIGHT ?? 4);
 const PROBE_MS = Number(process.env.ROUTER_PROBE_MS ?? 5000);
 
-type Replica = {
+export type Replica = {
   url: string;
   inflight: number;
   healthy: boolean;
