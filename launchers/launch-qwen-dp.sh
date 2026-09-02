@@ -56,7 +56,9 @@ DP_SIZE="${DP_SIZE:-3}"
 #     plugin built from source. Unnecessary here.
 # Consequence worth knowing: under DP the QSFP fabric is IDLE. It earns its keep only for
 # tensor/pipeline parallel or for KV pooling.
-DP_ADDR="${DP_ADDR:?set DP_ADDR to rank 0's LAN address}"
+# NO APOSTROPHES in a ${VAR:?message}. An apostrophe here opens a quote context that
+# swallows following lines until the next one, silently leaving later assignments unset.
+DP_ADDR="${DP_ADDR:?set DP_ADDR to the LAN address of rank 0}"
 DP_PORT="${DP_PORT:-29561}"
 PORT="${PORT:-8100}"
 LAN_IF="${LAN_IF:-enP7s7}"
@@ -70,7 +72,12 @@ docker rm -f "$NAME" 2>/dev/null || true
 # swappiness 0 plus memlock there is no relief valve. Loading 79 GiB on top of a previous
 # allocation that has not been released wedges the node hard enough to need a power cycle.
 # Ask me how I know. Refuse to start until memory is genuinely back.
-sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+# Best-effort: the load-bearing check is the free-memory wait below, which needs no
+# privileges. Skip the cache drop rather than fail when sudo is unavailable.
+sync
+if ! echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1; then
+  echo "note: could not drop caches (no passwordless sudo); relying on the memory check" >&2
+fi
 avail=0
 for _ in $(seq 1 60); do
   avail="$(free -g | awk '/Mem:/{print $7}')"
