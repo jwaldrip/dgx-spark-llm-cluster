@@ -278,3 +278,44 @@ not exist.
 
 If the real prompt mix shifts smaller, re-derive from the new mean rather than from a
 synthetic benchmark.
+
+## The scheduler was clamped to 2048 tokens per iteration
+
+Leaving `--max-num-batched-tokens` unset is a trap once speculative decoding is on. vLLM
+clamps the scheduler to make room for draft token slots and says so exactly once, as a
+WARNING, among thousands of startup lines:
+
+    max_num_scheduled_tokens is set to 2048 based on the speculative decoding settings.
+    This may lead to suboptimal performance. Consider increasing max_num_batched_tokens
+    to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+
+2048 tokens per iteration means a 790,455-token prompt needs 386 prefill passes. It also
+explains the earlier observation that turning MTP on dropped prefill from 276 to 207 tok/s:
+MTP was not slower at prefill, it silently shrank the scheduler budget.
+
+Measured three values. Prefill is a single uncached 120,041-token prompt, close to the
+observed main-lane mean, with a per-invocation nonce so prefix caching cannot serve it.
+Throughput is the concurrent load generator with distinct prompts per request.
+
+    batched tokens   prefill tok/s   par1 per-req   par8 agg gen   par12 agg gen   KV tokens
+    unset (2048)            1178.7          29.28           60.7            69.1   2,716,958
+    8192                    1285.5          15.72           38.7               -   2,891,013
+    16384                   1240.4          26.53           63.4            79.1   2,457,997
+
+16384 is the default. At 12 concurrent it is 14% better on aggregate generation and 14% on
+aggregate total throughput (1,032.7 against 906.8 tok/s), for 9% of single-stream and 10%
+of the KV pool.
+
+8192 is the interesting one: best large-prompt prefill of the three, and it costs 38% of
+aggregate generation to get there. Worth knowing if a workload ever becomes pure prefill,
+and wrong for this one.
+
+### A measurement note
+
+The first comparison of 8192 against 16384 used `omp bench --runs 3` and produced 16.46
+against 25.66 tok/s at concurrency 1, which is not a credible spread for a single stream.
+Three samples is too few here, and one of those runs was taken before CUDA graphs had
+warmed, which reads as an eager-mode profile: TTFT in the thousands of milliseconds and
+prefill near 25 tok/s. Every number in the table above comes from the load generator after
+explicit warmup requests instead. If a throughput comparison shows a gap that large at
+concurrency 1, suspect the harness before the setting.
