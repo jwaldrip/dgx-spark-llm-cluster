@@ -254,7 +254,10 @@ EAGER="${EAGER-}"
 # first unescaped }, so the JSON's own closing brace terminates it and the remaining } is
 # appended as literal text. With SPEC set empty that produced SPEC=} and vLLM died on
 # "unrecognized arguments: }". Build the default separately.
-SPEC_DEFAULT='--speculative-config {"method":"mtp","num_speculative_tokens":4}'
+# SPEC_TOKENS is swept separately from SPEC so the count can be changed without retyping
+# the JSON. See the sweep table in docs/tp3-bisect.md before changing it.
+SPEC_TOKENS="${SPEC_TOKENS:-4}"
+SPEC_DEFAULT="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$SPEC_TOKENS}"
 
 # Defaults below are the configuration that was actually measured and gated end to end on
 # this cluster. Every one of them was arrived at by changing one axis at a time and running

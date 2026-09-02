@@ -319,3 +319,25 @@ warmed, which reads as an eager-mode profile: TTFT in the thousands of milliseco
 prefill near 25 tok/s. Every number in the table above comes from the load generator after
 explicit warmup requests instead. If a throughput comparison shows a gap that large at
 concurrency 1, suspect the harness before the setting.
+
+## num_speculative_tokens: swept, and 4 was already right
+
+`SPEC_TOKENS` is now a knob so the count can be changed without retyping the JSON. Swept
+at 16,384 batched tokens and admission 12, measured with the load generator after warmup:
+
+    spec tokens   par1 per-req   par12 agg gen   par12 agg total   KV tokens
+        2                28.78            74.1             953.5   2,445,227
+        4                26.53            79.1            1032.7   2,457,997
+        6                27.42            53.4             689.2   2,669,102
+
+4 stays. 6 is not a mild regression, it is 32% off aggregate generation, which is what
+happens when the drafter proposes more tokens than get accepted and the rejected work is
+paid for anyway. 2 gives up 5% of aggregate for a slightly better single stream.
+
+Single-stream numbers across all three sit between 26.5 and 28.8, which is inside the
+run-to-run band, so nothing should be read into that column.
+
+Worth stating plainly: this sweep changed nothing. The value was already correct, and the
+useful output is the evidence that it is, plus the knob to re-sweep after the next change
+that moves the acceptance rate. The published recipe's 7 belongs to its DFlash2 drafter,
+which is a different mechanism from native MTP and is not evidence for this setting.
