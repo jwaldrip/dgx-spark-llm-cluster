@@ -115,3 +115,58 @@ output, because `${VAR-default}` only supplies the default when `VAR` is unset, 
 set to empty, and the default text itself contained JSON with its own braces, so the shell's
 own expansion boundary landed inside the fallback value. Test every branch a conditional
 expansion actually has, not the one that is easiest to trigger.
+
+## Resolution: it works on the recipe's own checkpoint
+
+The repetition lock was the checkpoint, not the topology. Switching to
+`LibertAIDAI/GLM-5.3-Flash-NVFP4` (rev `caca4e6a`), the checkpoint the published recipe
+actually uses and the one its four overlays were written against, plus the vllm#54150
+overlay, produces a working endpoint.
+
+    metric                     value
+    per-rank weights           62.14 GiB   (published recipe: 63.64)
+    KV cache, 1m variant       2,473,737 tokens
+    max_model_len              1,048,576
+    needle retrieval           found at 790,455 prompt tokens
+    cold prefill, 790K         678 s
+    warm repeat, same prompt   9 s
+    prefix cache hits          790,272 of 1,580,910 queries
+
+The gate passes: 0 U+FFFD across 6 runs, a well-formed structured tool call, and a clean
+multi-turn tool-result continuation, with no repetition lock anywhere.
+
+The 75x gap between the cold and warm 790K prefill is the number that matters for this
+workload, which runs 181 prompt tokens per generated token. It is also why the padding
+question was worth chasing rather than settling for a smaller context.
+
+### One more defect found on the way to 1m
+
+The `fast` variant (262,144) passed the gate, then the `1m` variant returned HTTP 500 after
+678 s of prefill:
+
+    launch_persistent_topk: persistent_topk would oversubscribe and the FilteredTopK
+    fallback requires >=128KB smem per block (have 101376).
+    total_ctas=124 > num_sms*occupancy=48
+
+That is the sparse attention indexer's top-k kernel exceeding GB10's shared memory as
+`total_ctas` grows with sequence length. It is exactly what `sparse_attn_indexer_kpool.py`
+guards, and it was absent because the bisect had swapped that patch out for the stock file
+and it was never swapped back. Restoring it fixed the 1m variant.
+
+The lesson is narrow and worth stating: when a bisect neutralizes a component, put it back
+before testing a DIFFERENT axis. The indexer patch was irrelevant to the repetition lock and
+load-bearing for long context, and testing context length while it was still disabled
+produced a failure that had nothing to do with context length.
+
+### Checkpoint verdict
+
+    checkpoint                        TP=3 loads   TP=3 correct   needs
+    LibertAIDAI (ModelOpt, W4A16)     yes          yes            modelopt-vllm54150.diff
+    RedHatAI (compressed-tensors,     yes          NO             routed_experts-w2-scale.diff
+      W4A4)                                                       to load at all
+
+RedHatAI remains the better checkpoint in the abstract, being structurally immune to #54150,
+and its loader defect is genuinely fixed here. But it emits a repetition lock at TP=3 that
+survived eliminating every other variable, and the leading explanation is that padding
+perturbs the dynamic activation quantization that only a W4A4 scheme has. That is a
+hypothesis, not a proven cause, and it is the open thread if RedHatAI is ever wanted at TP=3.

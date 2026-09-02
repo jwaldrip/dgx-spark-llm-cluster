@@ -152,12 +152,29 @@ esac
 # image's already-installed vllm package, build nothing.
 IMAGE="${GLM_TP3_IMAGE:-ghcr.io/tonyd2wild/vllm-glm53-flash:sm121-v11-dflash2}"
 NAME="vllm_glm53"
-REV="36c184c6cda000a481711306df5adde42f63321a"
+# CHECKPOINT selects which of the two staged checkpoints to serve. They are NOT
+# interchangeable, and the difference is load-bearing:
+#   redhat   compressed-tensors, W4A4 (activations quantized too). Immune to vllm#54150
+#            by construction. Loads and serves at TP=3 but emits a repetition lock; needs
+#            the routed_experts w2 scale overlay even to load. See docs/tp3-bisect.md.
+#   libertai ModelOpt NVFP4, W4A16 weight-only. What the published recipe actually uses,
+#            and what its four overlays were written against. Affected by vllm#54150, so
+#            it needs the modelopt overlay in overlay/modelopt-vllm54150.diff.
+CHECKPOINT="${CHECKPOINT:-libertai}"
+case "$CHECKPOINT" in
+  redhat)
+    HF_REPO="models--RedHatAI--GLM-5.3-Flash-NVFP4"
+    REV="36c184c6cda000a481711306df5adde42f63321a" ;;
+  libertai)
+    HF_REPO="models--LibertAIDAI--GLM-5.3-Flash-NVFP4"
+    REV="caca4e6a4ebbd66f159d3d2fc256683fd6e27177" ;;
+  *) echo "CHECKPOINT must be redhat or libertai (got $CHECKPOINT)" >&2; exit 2 ;;
+esac
 
 # HF cache snapshots are symlink farms into ../../blobs (docs/gotchas.md), so the repo ROOT
 # must be mounted, not just the snapshot directory, or every weight and template is a
 # dangling link.
-REPO_HOST="$HOME/.cache/huggingface/hub/models--RedHatAI--GLM-5.3-Flash-NVFP4"
+REPO_HOST="$HOME/.cache/huggingface/hub/$HF_REPO"
 MODEL_PATH="/models/glm-repo/snapshots/$REV"
 CACHE_HOST="/var/tmp/glm53-vllm-cache"
 # Overridable. This is OUR TP=2-era SM121 indexer patch, not one of FlyCockpit's four
