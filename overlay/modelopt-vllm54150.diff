@@ -1,0 +1,51 @@
+--- a/vllm/model_executor/layers/quantization/modelopt.py
++++ b/vllm/model_executor/layers/quantization/modelopt.py
+@@ -1527,15 +1527,43 @@
+         Convert NVFP4 MoE weights into kernel format and setup the kernel.
+         """
+ 
+-        # Use a single gscale for w13.
++        # Use a single gscale for w13. The kernels take one global scale per
++        # expert for the fused w13 GEMM, but ModelOpt checkpoints carry
++        # separate global scales for w1 (gate) and w3 (up). Simply picking one
++        # of them mis-scales the other shard's dequant by gs_other/gs_picked
++        # (measured up to 10x on GLM-5.3-Flash NVFP4), so instead requantize:
++        # take the per-expert max and fold each shard's ratio into its E4M3
++        # block scales. Ratios are <= 1, so no overflow; the cost is one
++        # extra E4M3 rounding on the down-scaled shard's block scales.
++        #
++        # Fix for vllm-project/vllm#54150, verbatim from the issue thread
++        # (comment by @shinyquagsire23, attributed to "Fable"). The issue is
++        # OPEN with no PR referencing it, so this is carried as a local
++        # overlay rather than waiting for upstream. Without it, agent tool
++        # calls desync into a repetition lock on corrupted tokens.
++        gs_pair = layer.w13_weight_scale_2.to(torch.float32)  # (E, num_shards)
+         if self.moe.is_act_and_mul and not torch.allclose(
+-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
++            gs_pair[:, 0], gs_pair[:, 1]
+         ):
+             logger.warning_once(
+-                "w1_weight_scale_2 must match w3_weight_scale_2. "
+-                "Accuracy may be affected."
++                "w1_weight_scale_2 != w3_weight_scale_2; requantizing the "
++                "block scales onto a shared per-expert global scale."
+             )
+-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
++            gs_shared = gs_pair.max(dim=1).values  # (E,)
++            bs = layer.w13_weight_scale
++            num_experts, n2, kg = bs.shape
++            num_shards = gs_pair.shape[1]
++            ratio = (gs_pair / gs_shared.unsqueeze(1)).view(
++                num_experts, num_shards, 1, 1
++            )
++            bs_f = bs.data.to(torch.float32).view(
++                num_experts, num_shards, n2 // num_shards, kg
++            )
++            bs_f = (bs_f * ratio).view(num_experts, n2, kg)
++            replace_parameter(layer, "w13_weight_scale", bs_f.to(bs.dtype))
++            w13_weight_scale_2 = gs_shared.contiguous()
++        else:
++            w13_weight_scale_2 = gs_pair[:, 0].contiguous()
+ 
+         (
+             w13,

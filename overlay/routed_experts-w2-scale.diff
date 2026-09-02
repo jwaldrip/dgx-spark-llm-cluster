@@ -1,0 +1,41 @@
+--- a/vllm/model_executor/layers/fused_moe/routed_experts.py
++++ b/vllm/model_executor/layers/fused_moe/routed_experts.py
+@@ -313,6 +313,18 @@
+         expert_id: int,
+     ):
+         param_data = param.data
++        # RedHatAI's compressed-tensors GLM-5.3-Flash reaches this loader for w2 with a
++        # loaded_weight that is NOT a scalar: it is a per-expert-shaped buffer, (num_experts,),
++        # carrying only THIS expert's value at index expert_id and zeros everywhere else.
++        # Measured directly: w2_input_global_scale arrives (288,) as
++        # [46.5, 0.0, 0.0, ...] for expert_id=0, and 46.5 is exactly expert 0's
++        # down_proj.input_global_scale in the checkpoint. w13 by contrast arrives as a
++        # genuine (1,) scalar, so only w2 needs this.
++        # Select this expert's element. Do NOT copy the buffer over the parameter: that
++        # writes zeros into the other 287 experts' scales on every call, which loads and
++        # serves happily and then emits a pure repetition lock ("locklocklock...").
++        if loaded_weight.numel() > 1 and loaded_weight.numel() == param_data.shape[0]:
++            loaded_weight = loaded_weight.flatten()[expert_id]
+         # for per tensor weight quantization
+         if shard_id in ("w1", "w3"):
+             # We have to keep the weight scales of w1 and w3 because
+@@ -840,6 +852,19 @@
+                     load_full_w2=getattr(param, "load_full_w2", False),
+                 )
+             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
++                import os as _os
++                if _os.environ.get("DIAG_SCALE") and getattr(
++                    RoutedExperts, "_diag_seen", 0
++                ) < 6:
++                    RoutedExperts._diag_seen = (
++                        getattr(RoutedExperts, "_diag_seen", 0) + 1
++                    )
++                    print(
++                        f"DIAGSCALE name={weight_name} shard={shard_id} eid={expert_id} "
++                        f"lshape={tuple(loaded_weight.shape)} pshape={tuple(param.shape)} "
++                        f"first6={[round(float(x), 6) for x in loaded_weight.flatten()[:6]]}",
++                        flush=True,
++                    )
+                 self._load_per_tensor_weight_scale(
+                     shard_id=shard_id,
+                     param=param,
