@@ -60,6 +60,15 @@ MPORT="29521"
 PORT="8000"
 # -------------------------------------------------------------------------------
 
+# TP2 across two nodes is a SINGLE-SUBNET link, so NCCL_IB_GID_INDEX=3 below is correct
+# here. It is NOT correct on a three-node pairwise triangle, where each pair sits on its
+# own /24: FlyCockpit/GLM-5.3-Flash-3x-DGX-Sparks docs/FABRIC.md calls pinning it fatal
+# there, and a triangle additionally needs a custom NCCL mesh plugin. Do not copy this
+# block to three nodes.
+#
+# Also note each physical QSFP port is TWO PCIe x4 twins of ~100 Gb/s. Pinning one HCA, as
+# every published recipe including NVIDIA's does, uses half the cable. Naming both twins
+# (NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1) is what reaches ~196 Gb/s. See docs/interconnect.md.
 case "$NODE_RANK" in
   0) HOST_IP="$HEAD_IP";   IB_HCA="$HEAD_HCA";   IFACE="$HEAD_IF";   HEADLESS="" ;;
   1) HOST_IP="$WORKER_IP"; IB_HCA="$WORKER_HCA"; IFACE="$WORKER_IF"; HEADLESS="--headless" ;;
@@ -69,6 +78,22 @@ test -f "$REPO_HOST/snapshots/$REV/config.json" || { echo "checkpoint missing" >
 test -f "$PATCH" || { echo "SM121 indexer top-k patch missing at $PATCH" >&2; exit 1; }
 mkdir -p "$CACHE_HOST"
 docker rm -f "$NAME" 2>/dev/null || true
+
+# GB10 unified memory has no relief valve: one 121 GiB pool shared by page cache and model,
+# swappiness 0, weights pinned via memlock. Loading on top of an unreleased allocation wedges
+# the node hard enough to need a power cycle. Wait for memory to actually come back.
+sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+avail=0
+for _ in $(seq 1 60); do
+  avail="$(free -g | awk '/Mem:/{print $7}')"
+  [ "$avail" -ge "${MIN_AVAIL_GIB:-100}" ] && break
+  sleep 5
+done
+if [ "$avail" -lt "${MIN_AVAIL_GIB:-100}" ]; then
+  echo "only ${avail} GiB available, need ${MIN_AVAIL_GIB:-100}; refusing to load" >&2
+  exit 1
+fi
+echo "preflight ok: ${avail} GiB available"
 
 docker run --gpus all -d \
   --name "$NAME" --restart no \

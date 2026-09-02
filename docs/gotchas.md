@@ -113,6 +113,56 @@ from configuration.
 Practical rule: **never build a one-shot A/B comparison against this endpoint.** Sample and
 compare distributions, or you will attribute your own noise to whatever you changed.
 
+
+## Unified memory has no relief valve, and iterating on flags will wedge the node
+
+This one cost three power cycles in a single day.
+
+GB10 has **one** 121 GiB pool addressed by both CPU and GPU through ATS. `nvidia-smi`
+reports `memory.total` as `N/A` because there is no separate GPU memory. Combine that with
+the required `vm.swappiness=0` and weights pinned via `--ulimit memlock=-1:-1`, and the
+kernel has nothing to reclaim under pressure.
+
+Two ways to hit it, both of which look like the node died:
+
+**Adding load beside a resident model.** A 126 GB download onto a node already holding an
+89 GiB model, with roughly 26 GiB of headroom, starved userspace.
+
+**Iterating on launch flags.** `docker rm -f` returns immediately, but the allocation is not
+necessarily back. Three relaunches in four minutes, each loading 79 GiB, wedged two nodes.
+
+The symptom is distinctive and easy to misdiagnose:
+
+```text
+ping                 replies
+ssh port 22          TCP connects
+ssh banner           never arrives, even after 120 s
+mDNS / .local        record disappears, so name resolution fails first
+```
+
+Because the `.local` name goes first, this reads as a networking problem. It is not: `avahi`
+is simply starved along with `sshd`. Test by IP before concluding anything about the
+network, and note that the node is unrecoverable without a power cycle.
+
+The guard belongs in the launcher, not in your habits:
+
+```bash
+docker rm -f "$NAME" 2>/dev/null || true
+sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+avail=0
+for _ in $(seq 1 60); do
+  avail="$(free -g | awk '/Mem:/{print $7}')"
+  [ "$avail" -ge "${MIN_AVAIL_GIB:-100}" ] && break
+  sleep 5
+done
+[ "$avail" -ge "${MIN_AVAIL_GIB:-100}" ] || { echo "only ${avail} GiB, refusing"; exit 1; }
+```
+
+And validate a flag set with a **one-node, DP=1** launch first. Argument errors then cost
+seconds instead of a node. Two of ours were trivial: the image ENTRYPOINT is already
+`["vllm","serve"]` so passing `serve` again makes vLLM read "serve" as the model name, and
+`--headless` is rejected outright under `--data-parallel-external-lb`.
+
 ## Never pin the KV cache size
 
 Published launchers carry `--kv-cache-memory` / `--kv-cache-memory-bytes` pins. The same
