@@ -237,3 +237,44 @@ and never sees the overlay's in-code override to 2112. The fix is to bake 2112 i
 `config.json`, which is the value the overlay would have chosen anyway. This is the same
 class of trap recorded earlier in this document: an override that reaches most of the model
 but not all of it.
+
+## Admission cap: derived, and it was throttling
+
+`--max-num-seqs 6` was inherited from launch-glm-tp2.sh, where the KV pool was 332,475
+tokens and 6 was already above the 2.7 mean-sized prompts that fit. At TP=3 the pool is
+2.7M tokens, 22 mean-sized prompts fit, and 6 was leaving the cluster idle.
+
+Measured with a concurrent load generator against the live endpoint, distinct prompts per
+request so prefix caching could not inflate the result:
+
+    concurrency   aggregate gen tok/s        per-request p50 tok/s
+                  cap 6      cap 12          cap 6      cap 12
+        1          21.3       18.7            28.8       29.3
+        4          52.6       53.0            13.3       13.3
+        8          49.3       60.7            7.3        8.0
+       12          55.5       69.1            5.0        6.2
+
+Cap 12 is a strict improvement at 8 and 12 concurrent: aggregate up 23% and 25%, and
+per-request latency up too rather than traded away. Wall time for 24 requests at 12
+concurrent fell from 107.6 s to 86.8 s. At 1 and 4 concurrent the two are within noise.
+
+12 is derived, not tuned to that curve:
+
+    floor((KV tokens / observed mean prompt tokens) / 2) = floor(22 / 2) = 11, rounded to 12
+
+The halving is the thrash margin. A cap near the number that fits is what caused a
+538-preemption collapse earlier on this cluster, when 4 was set against a pool holding
+4.23. 12 also sits above the observed peak of 9 model-active sessions, so it does not
+throttle real demand.
+
+### Why not push the cap higher
+
+Aggregate was still climbing at 12 concurrent, which is tempting. It should be resisted on
+this evidence, because the load generator uses roughly 3,000-token prompts and the real
+main lane averages 122,835. The load test therefore says nothing about KV pressure: 24 of
+its requests occupy under 3% of the pool, while 24 real requests would need more than the
+whole thing. Raising the cap to chase that curve would be tuning on a workload that does
+not exist.
+
+If the real prompt mix shifts smaller, re-derive from the new mean rather than from a
+synthetic benchmark.
