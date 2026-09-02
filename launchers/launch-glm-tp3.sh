@@ -311,6 +311,19 @@ GMU="${GMU:-0.80}"
 #   floor((KV tokens / observed mean prompt tokens) / 2)
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-12}"
 
+# Leaving this unset is a trap when speculative decoding is on. vLLM clamps the scheduler
+# to make room for draft token slots and says so, once, in a WARNING among thousands of
+# startup lines:
+#
+#   max_num_scheduled_tokens is set to 2048 based on the speculative decoding settings.
+#   This may lead to suboptimal performance. Consider increasing max_num_batched_tokens
+#   to accommodate the additional draft token slots, or decrease num_speculative_tokens.
+#
+# 2048 tokens per iteration means a 790,455-token prompt takes 386 prefill passes. On a
+# lane running 181 prompt tokens per generated token that is the wrong thing to leave to a
+# default. Setting it explicitly lifts the clamp.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-16384}"
+
 # FABRIC picks how NCCL crosses the QSFP triangle. Measured on this cluster with a 3-rank
 # bf16 all-reduce, both correct (0 mismatched elements of 2^20):
 #
@@ -450,6 +463,7 @@ docker run --gpus all -d \
     --gpu-memory-utilization "$GMU" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_NUM_SEQS" \
+    --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
     --block-size 2304 \
     --moe-backend marlin \
     --kv-cache-dtype "$KV_DTYPE" \
