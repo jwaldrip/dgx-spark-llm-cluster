@@ -170,3 +170,70 @@ and its loader defect is genuinely fixed here. But it emits a repetition lock at
 survived eliminating every other variable, and the leading explanation is that padding
 perturbs the dynamic activation quantization that only a W4A4 scheme has. That is a
 hypothesis, not a proven cause, and it is the open thread if RedHatAI is ever wanted at TP=3.
+
+## Closing the gap to the published recipe
+
+The first working TP=3 endpoint was a deliberately conservative variant: BF16 KV, no
+speculative decoding, eager mode, gpu-memory-utilization 0.80. That was the right call
+during a bisect and the wrong place to leave it. Each axis was then re-enabled one at a
+time, with the fidelity gate and a 790,455-token needle after every change.
+
+    axis                        gen tok/s   TTFT ms   prefill tok/s   KV tokens   gate
+    eager, BF16 KV, no spec         16.75      2753            24.3   1,919,006   pass
+    compiled                        20.45       247           275.1   1,891,946   pass
+    compiled + fp8 KV               20.43       236           276.0   3,566,043   pass
+    compiled + fp8 KV + MTP         29.62       318           207.7   2,941,956   pass
+
+Shipped defaults are the last row. Per-rank weights land at 63.64 GiB, which is the
+published recipe's figure exactly, and 29.62 tok/s is within 5% of its reported 31.3 tok/s
+warm on the same 1m variant.
+
+Compiled is the change that matters most for this workload. Generation improved 22%, but
+prefill improved 11x and TTFT 11x, on a lane that runs 181 prompt tokens per generated
+token. Eager mode was costing far more than the generation number suggested.
+
+fp8 KV nearly doubles the pool for no measured throughput cost. It is gated rather than
+assumed because GLM ships no KV scaling factors, so vLLM substitutes unit scale silently;
+the 790K needle still returns the exact string under it.
+
+MTP is worth its KV cost: 1.45x generation for 17% of the pool.
+
+gpu-memory-utilization stays at 0.80 rather than the recipe's 0.85. At 0.85 rank 0 settled
+at 1.4 GiB available of 121 GiB, and rank 0 also runs the API server. On hardware whose
+failure mode is a wedge needing a physical power cycle, that is not a trade worth 6 GiB of
+KV. At 0.80 with MTP the ranks sit at 6, 12 and 12 GiB.
+
+### The fabric, which was the biggest surprise
+
+NVIDIA publishes a three-Spark NCCL page prescribing `NCCL_IB_SUBNET_AWARE_ROUTING=1` with
+`NCCL_NET_PLUGIN=none`. That is stock NCCL's answer to the same problem the published
+recipe's third-party mesh plugin was built for: on a pairwise triangle no single HCA sees
+all three peers. Measured here with a 3-rank bf16 all-reduce, both correct to zero
+mismatched elements:
+
+    size     mesh plugin    NVIDIA stock IB
+     8 MB     2.03 GB/s       8.42 GB/s
+    64 MB    12.50 GB/s      22.53 GB/s
+   256 MB    12.12 GB/s      22.35 GB/s
+
+Stock IB wins 1.8x on large messages and 4.1x on small ones, and small messages are what
+per-token decode all-reduces are. `FABRIC=nvidia` is now the default; `FABRIC=mesh` is kept
+as a fallback. The supported path was better than the community workaround here, which is
+not the usual direction.
+
+### Two mistakes in this round
+
+MTP appeared to give no benefit at all on its first measurement, 20.45 against 20.43. It
+had never engaged: `SPEC` defaults to empty and needs `SPEC=mtp`, and omitting the variable
+is not the same as setting it. `speculative_config=None` in the engine's own startup line
+is what caught it. There is now a `SPEC=mtp` shorthand and a one-line verification in the
+comment, because passing that JSON through ssh plus a shell is how a flag silently fails to
+arrive.
+
+Then MTP would not load at all: `MergedColumnParallelLinear` asserts each output size
+divides `tp_size`, and the MTP layer builds its MLP from `moe_intermediate_size` 2048, which
+3 does not divide. The MTP layer is constructed in `mtp.py`, reads `config.json` directly,
+and never sees the overlay's in-code override to 2112. The fix is to bake 2112 into
+`config.json`, which is the value the overlay would have chosen anyway. This is the same
+class of trap recorded earlier in this document: an override that reaches most of the model
+but not all of it.

@@ -138,7 +138,9 @@ case "$RANK" in
   *) echo "rank must be 0, 1, or 2 (got $RANK)" >&2; exit 2 ;;
 esac
 
-VARIANT="${VARIANT:-fast}"
+# 1m by default: the measured main-lane prompt p95 is 782,561 tokens, which the fast
+# variant's 262,144 ceiling cannot serve at all. fast is kept for quick smoke work.
+VARIANT="${VARIANT:-1m}"
 case "$VARIANT" in
   fast) MAX_MODEL_LEN=262144 ;;
   1m)   MAX_MODEL_LEN=1048576 ;;
@@ -161,13 +163,23 @@ NAME="vllm_glm53"
 #            and what its four overlays were written against. Affected by vllm#54150, so
 #            it needs the modelopt overlay in overlay/modelopt-vllm54150.diff.
 CHECKPOINT="${CHECKPOINT:-libertai}"
+FIXES="$HOME/glm-tp3/fixes"
+VP="/usr/local/lib/python3.12/dist-packages/vllm"
 case "$CHECKPOINT" in
   redhat)
     HF_REPO="models--RedHatAI--GLM-5.3-Flash-NVFP4"
-    REV="36c184c6cda000a481711306df5adde42f63321a" ;;
+    REV="36c184c6cda000a481711306df5adde42f63321a"
+    # Required just to LOAD: the w2 per-tensor scale loader gets a per-expert-shaped
+    # buffer rather than a scalar and raises on reshape(()).
+    CKPT_FIX="-v $FIXES/routed_experts.py:$VP/model_executor/layers/fused_moe/routed_experts.py:ro" ;;
   libertai)
     HF_REPO="models--LibertAIDAI--GLM-5.3-Flash-NVFP4"
-    REV="caca4e6a4ebbd66f159d3d2fc256683fd6e27177" ;;
+    REV="caca4e6a4ebbd66f159d3d2fc256683fd6e27177"
+    # Required for CORRECTNESS, not just to load. Without it vllm#54150 mis-scales every
+    # expert's up projection and tool-call tokens corrupt into a repetition lock. This is
+    # mounted by default deliberately: it is not optional for this checkpoint, and leaving
+    # it to a caller-supplied EXTRA_MOUNTS means a default launch serves garbage.
+    CKPT_FIX="-v $FIXES/modelopt.py:$VP/model_executor/layers/quantization/modelopt.py:ro" ;;
   *) echo "CHECKPOINT must be redhat or libertai (got $CHECKPOINT)" >&2; exit 2 ;;
 esac
 
@@ -186,8 +198,13 @@ VLLM_PKG="/usr/local/lib/python3.12/dist-packages/vllm"
 # Overridable so a pad set can be swapped without editing this file. The published recipe
 # documents exactly TWO pads (num_attention_heads and moe_intermediate_size); any others in
 # a config here were invented locally and must be treated as unvalidated until gated.
-CONFIG_HOST="${CONFIG_HOST:-$HOME/glm-tp3/config/config.json}"
-HF_OVERRIDES_FILE="${HF_OVERRIDES_FILE:-$HOME/glm-tp3/hf_overrides.json}"
+# config-tp3.json is the gated pad set: num_attention_heads 66 and moe_intermediate_size
+# 2112, both BAKED IN rather than left to --hf-overrides. That matters for MTP: the MTP
+# layer is built in mtp.py, reads config.json directly, and asserts in
+# MergedColumnParallelLinear on a stock 2048 because 2048 % 3 != 0. 2112/3 = 704 and
+# 704 % 16 == 0 for the NVFP4 quant group.
+CONFIG_HOST="${CONFIG_HOST:-$HOME/glm-tp3/config/config-tp3.json}"
+HF_OVERRIDES_FILE="${HF_OVERRIDES_FILE:-$HOME/glm-tp3/hf_overrides-tp3.json}"
 OVERLAY_ROOT="$HOME/glm-tp3/overlay/vllm"
 # Overridable so a failing load can be bisected overlay by overlay. Point one at the image's
 # own stock file to neutralise just that mount without disturbing the others. This is how the
@@ -227,44 +244,45 @@ esac
 MPORT="${MPORT:-29521}"
 PORT="${PORT:-8000}"
 
-# --enforce-eager is NOT free. Independent field reports on this hardware measured
-# 20.9 -> 36.7 tok/s from compiling instead of forcing eager, and one of the three ways
-# this repo's own GLM TP=2 comparison was crippled was leaving it on. Default it ON for the
-# very first boot of a checkpoint nobody has run at TP=3, because a compile failure during
-# a 63 GiB-per-rank load is an expensive way to learn something. Then retest with
-# EAGER= to claim the throughput back, and record both numbers.
-EAGER="${EAGER---enforce-eager}"
-
-# SPEC and KV_DTYPE are the two engine flags TP=3 adds that the proven TP=2 config never
-# carried, which makes them the first things to bisect when a load fails. MTP pulls in
-# layer 45, and on THIS checkpoint layer 45 is the FP8 block-quantized group rather than
-# NVFP4, so it exercises a quantization path the other 42 expert layers never touch.
-#   SPEC=           disable speculative decoding entirely
-#   KV_DTYPE=auto   BF16 KV, exactly what TP=2 used
-# No surrounding single quotes on the JSON: this is expanded unquoted so the shell splits it
+# Compiled by DEFAULT now that it is measured and gated here. --enforce-eager cost
+# 16.75 vs 20.45 tok/s generation, and far more where it matters for this workload:
+# TTFT 2753 vs 247 ms and prefill 24.3 vs 275.1 tok/s, an 11x prefill difference on a lane
+# that runs 181 prompt tokens per generated token. Set EAGER=--enforce-eager to go back,
+# which is worth doing as a first step if a new checkpoint fails to compile.
+EAGER="${EAGER-}"
 # NEVER put a brace-containing default inside ${VAR-default}: bash ends the expansion at the
 # first unescaped }, so the JSON's own closing brace terminates it and the remaining } is
 # appended as literal text. With SPEC set empty that produced SPEC=} and vLLM died on
 # "unrecognized arguments: }". Build the default separately.
 SPEC_DEFAULT='--speculative-config {"method":"mtp","num_speculative_tokens":4}'
 
-# Both of these now DEFAULT to the proven TP=2 engine configuration rather than to the
-# published recipe's, because TP=2 is the only configuration of this checkpoint that has
-# ever actually served on this hardware, and it deliberately carried neither.
+# Defaults below are the configuration that was actually measured and gated end to end on
+# this cluster. Every one of them was arrived at by changing one axis at a time and running
+# the fidelity gate plus a 790,455-token needle after each. Do not change one without
+# re-running both.
 #
-# fp8_e4m3 KV is opt-in, not default: no GLM checkpoint ships KV scaling factors, so fp8 KV
-# runs at vLLM's unit scale of 1.0. That silent substitution is a quality variable, and
-# docs/checkpoint-selection.md already refused to carry it into the TP=2 bring-up. The same
-# reasoning applies here, and more so, since TP=3 on compressed-tensors is unproven.
+#   axis            gen tok/s   TTFT ms   prefill tok/s   KV tokens
+#   eager, bf16 KV      16.75      2753            24.3   1,919,006
+#   compiled            20.45       247           275.1   1,891,946
+#   + fp8 KV            20.43       236           276.0   3,566,043
+#   + MTP               29.62       318           207.7   2,941,956
 #
-# MTP is opt-in because it pulls in layer 45, which on THIS checkpoint is the FP8
-# block-quantized group rather than NVFP4, exercising a quantization path the other 42
-# expert layers never touch. Carrying it into a first boot conflates two unknowns.
-#
-# Set SPEC="$SPEC_DEFAULT" and KV_DTYPE=fp8_e4m3 to re-add them as controlled changes once
-# the base loads and passes the fidelity gate, and record a measurement for each.
-SPEC="${SPEC-}"
-KV_DTYPE="${KV_DTYPE:-auto}"
+# MTP is worth its KV cost: 1.45x generation for 17% of the pool. The published recipe
+# reports 31.3 tok/s warm on its 1m variant, so this lands within 5% of it, and per-rank
+# weights come out at 63.64 GiB, which is that recipe's figure exactly.
+SPEC="${SPEC-mtp}"
+# Shorthand, because passing that JSON through ssh plus a shell is how you end up
+# benchmarking a flag that never reached the container. SPEC=mtp is unambiguous, and
+# SPEC= disables speculation entirely.
+# Verify after launch, every time, rather than trusting the launch line:
+#   docker inspect vllm_glm53 --format '{{json .Args}}' | grep -c speculative
+case "$SPEC" in
+  mtp) SPEC="$SPEC_DEFAULT" ;;
+esac
+# fp8 KV nearly doubles the pool at no measured throughput or quality cost here: the gate
+# passes and the 790K needle still returns the exact string. GLM ships no KV scaling factors
+# so this runs at unit scale, which is why it is gated rather than assumed.
+KV_DTYPE="${KV_DTYPE:-fp8_e4m3}"
 
 # The published recipe uses 0.85. Measured here at 0.85 on the 1m variant, rank 0 settled at
 # 1.4 GiB available of 121 GiB, with 120 GiB used. Ranks 1 and 2 sat near 6.5 GiB. Rank 0 is
@@ -274,6 +292,39 @@ KV_DTYPE="${KV_DTYPE:-auto}"
 # trade is real and small: each 0.01 is roughly 1.2 GiB of KV, about 29K tokens at this
 # model's per-token cost. Buy the headroom.
 GMU="${GMU:-0.80}"
+
+# FABRIC picks how NCCL crosses the QSFP triangle. Measured on this cluster with a 3-rank
+# bf16 all-reduce, both correct (0 mismatched elements of 2^20):
+#
+#   size    mesh plugin    NVIDIA stock IB
+#    8 MB    2.03 GB/s      8.42 GB/s
+#   64 MB   12.50 GB/s     22.53 GB/s
+#  256 MB   12.12 GB/s     22.35 GB/s
+#
+# nvidia wins 1.8x on large messages and 4.1x on small ones, and small is what per-token
+# decode all-reduces are. It is also the supported path: build.nvidia.com/spark/nccl has a
+# three-Spark page prescribing exactly NCCL_IB_SUBNET_AWARE_ROUTING=1 with
+# NCCL_NET_PLUGIN=none. Subnet-aware routing is stock NCCL's answer to the same problem the
+# third-party mesh plugin was built for: on a pairwise triangle no single HCA sees all three
+# peers, and each adjacent pair is its own /24.
+#   nvidia  stock IB, subnet-aware routing, no plugin. Default.
+#   mesh    FlyCockpit's third-party plugin with stock IB disabled. Kept as a fallback.
+FABRIC="${FABRIC:-nvidia}"
+case "$FABRIC" in
+  nvidia)
+    FABRIC_ENV="-e NCCL_IB_SUBNET_AWARE_ROUTING=1 -e NCCL_NET_PLUGIN=none"
+    FABRIC_ENV="$FABRIC_ENV -e NCCL_SOCKET_IFNAME=$LAN_IF -e UCX_NET_DEVICES=$LAN_IF"
+    # Deliberately NOT set here: NCCL_IB_DISABLE (we want IB), NCCL_IB_GID_INDEX (fatal to
+    # pin on a triangle), NCCL_IB_HCA (let subnet-aware routing pick per peer), and
+    # NCCL_IB_MERGE_NICS (wrong lever, see docs/interconnect.md).
+    ;;
+  mesh)
+    FABRIC_ENV="-e NCCL_NET=Mesh -e NCCL_NET_PLUGIN=mesh -e NCCL_ALGO=Ring"
+    FABRIC_ENV="$FABRIC_ENV -e NCCL_IB_DISABLE=1 -e NCCL_SOCKET_IFNAME==$LAN_IF"
+    FABRIC_ENV="$FABRIC_ENV -e NCCL_MESH_DEBUG=1 -e NCCL_CROSS_NIC=0 -e NCCL_IB_MERGE_NICS=0"
+    ;;
+  *) echo "FABRIC must be nvidia or mesh (got $FABRIC)" >&2; exit 2 ;;
+esac
 # -------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------- preflight: everything the
@@ -356,6 +407,7 @@ docker run --gpus all -d \
   -v "$PATCH:$VLLM_PKG/model_executor/layers/sparse_attn_indexer_kpool.py:ro" \
   -v "$PLUGIN_DIR:/opt/nccl-mesh:ro" \
   -v "$CACHE_HOST:/cache" \
+  $CKPT_FIX \
   $EXTRA_MOUNTS \
   $EXTRA_ENV \
   -e VLLM_HOST_IP="$HOST_IP" \
@@ -366,12 +418,9 @@ docker run --gpus all -d \
   -e TORCH_CUDA_ARCH_LIST=12.1a -e FLASHINFER_CUDA_ARCH_LIST=12.1a \
   -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
   -e LD_LIBRARY_PATH="$MESH_LD_LIBRARY_PATH" \
-  -e NCCL_NET=Mesh -e NCCL_NET_PLUGIN=mesh -e NCCL_ALGO=Ring \
-  -e NCCL_IB_DISABLE=1 \
-  -e NCCL_SOCKET_IFNAME="=$LAN_IF" \
+  $FABRIC_ENV \
   -e GLOO_SOCKET_IFNAME="$LAN_IF" -e TP_SOCKET_IFNAME="$LAN_IF" -e MN_IF_NAME="$LAN_IF" \
-  -e NCCL_MESH_DEBUG=1 \
-  -e NCCL_CUMEM_ENABLE=0 -e NCCL_NVLS_ENABLE=0 -e NCCL_CROSS_NIC=0 -e NCCL_IB_MERGE_NICS=0 \
+  -e NCCL_CUMEM_ENABLE=0 -e NCCL_NVLS_ENABLE=0 \
   -e NCCL_IGNORE_CPU_AFFINITY=1 -e NCCL_DEBUG=WARN \
   -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   "$IMAGE" \
