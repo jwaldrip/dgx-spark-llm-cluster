@@ -265,6 +265,15 @@ SPEC_DEFAULT='--speculative-config {"method":"mtp","num_speculative_tokens":4}'
 # the base loads and passes the fidelity gate, and record a measurement for each.
 SPEC="${SPEC-}"
 KV_DTYPE="${KV_DTYPE:-auto}"
+
+# The published recipe uses 0.85. Measured here at 0.85 on the 1m variant, rank 0 settled at
+# 1.4 GiB available of 121 GiB, with 120 GiB used. Ranks 1 and 2 sat near 6.5 GiB. Rank 0 is
+# tighter because it also runs the API server. That is too close to the edge on hardware
+# whose failure mode is a wedge needing a physical power cycle, and which has no relief
+# valve: swappiness 0, weights pinned via memlock, one pool shared with page cache. The
+# trade is real and small: each 0.01 is roughly 1.2 GiB of KV, about 29K tokens at this
+# model's per-token cost. Buy the headroom.
+GMU="${GMU:-0.80}"
 # -------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------- preflight: everything the
@@ -371,7 +380,7 @@ docker run --gpus all -d \
     --host 0.0.0.0 --port "$PORT" \
     --trust-remote-code \
     --tensor-parallel-size 3 \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization "$GMU" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs 6 \
     --block-size 2304 \
