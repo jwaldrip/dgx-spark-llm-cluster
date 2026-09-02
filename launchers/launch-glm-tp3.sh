@@ -160,20 +160,35 @@ REV="36c184c6cda000a481711306df5adde42f63321a"
 REPO_HOST="$HOME/.cache/huggingface/hub/models--RedHatAI--GLM-5.3-Flash-NVFP4"
 MODEL_PATH="/models/glm-repo/snapshots/$REV"
 CACHE_HOST="/var/tmp/glm53-vllm-cache"
-PATCH="$HOME/patches/sparse_attn_indexer_kpool.py"
+# Overridable. This is OUR TP=2-era SM121 indexer patch, not one of FlyCockpit's four
+# overlays. Their NOTES.md states the indexer is REPLICATED at TP=3 rather than padded, and
+# index_n_heads is 32, which does not divide by 3 -- so a patch that shards it is a live
+# suspect for garbage output. Point this at the image's stock file to take it out of play.
+PATCH="${PATCH:-$HOME/patches/sparse_attn_indexer_kpool.py}"
 VLLM_PKG="/usr/local/lib/python3.12/dist-packages/vllm"
-
-# ---- ADJUST HERE if a sibling reports a different path. Everything below this block came
-# from the batch contract plus MeshPlugin / OverlayCompat / ConfigPadding hub reports; see
-# the confirmation ledger in the header comment for what is settled vs. still moving.
-CONFIG_HOST="$HOME/glm-tp3/config/config.json"
-HF_OVERRIDES_FILE="$HOME/glm-tp3/hf_overrides.json"
+# Overridable so a pad set can be swapped without editing this file. The published recipe
+# documents exactly TWO pads (num_attention_heads and moe_intermediate_size); any others in
+# a config here were invented locally and must be treated as unvalidated until gated.
+CONFIG_HOST="${CONFIG_HOST:-$HOME/glm-tp3/config/config.json}"
+HF_OVERRIDES_FILE="${HF_OVERRIDES_FILE:-$HOME/glm-tp3/hf_overrides.json}"
 OVERLAY_ROOT="$HOME/glm-tp3/overlay/vllm"
-OVERLAY_MODEL_PY="$OVERLAY_ROOT/models/glm5next/nvidia/model.py"
-OVERLAY_VOCAB_PY="$OVERLAY_ROOT/model_executor/layers/vocab_parallel_embedding.py"
-OVERLAY_WEIGHT_UTILS_PY="$OVERLAY_ROOT/model_executor/model_loader/weight_utils.py"
-OVERLAY_PARAMETER_PY="$OVERLAY_ROOT/model_executor/parameter.py"
+# Overridable so a failing load can be bisected overlay by overlay. Point one at the image's
+# own stock file to neutralise just that mount without disturbing the others. This is how the
+# e_score_correction_bias mis-routing was isolated to model.py.
+OVERLAY_MODEL_PY="${OVERLAY_MODEL_PY:-$OVERLAY_ROOT/models/glm5next/nvidia/model.py}"
+OVERLAY_VOCAB_PY="${OVERLAY_VOCAB_PY:-$OVERLAY_ROOT/model_executor/layers/vocab_parallel_embedding.py}"
+OVERLAY_WEIGHT_UTILS_PY="${OVERLAY_WEIGHT_UTILS_PY:-$OVERLAY_ROOT/model_executor/model_loader/weight_utils.py}"
+# Optional extra `-e NAME=value` arguments, as one pre-quoted string, for one-off
+# instrumentation. Expanded unquoted, so no value here may contain a space. Shell
+# variables set outside the container are NOT visible to it; they must come through here.
+EXTRA_ENV="${EXTRA_ENV:-}"
+OVERLAY_PARAMETER_PY="${OVERLAY_PARAMETER_PY:-$OVERLAY_ROOT/model_executor/parameter.py}"
 PLUGIN_DIR="$HOME/glm-tp3/plugin"
+# Optional extra read-only mounts, as a single pre-quoted string of -v arguments. Used to
+# drop an instrumented copy of a vLLM module in for one diagnostic run without editing this
+# file. Expanded unquoted on purpose so each -v and its argument become separate argv words,
+# which means no path here may contain a space.
+EXTRA_MOUNTS="${EXTRA_MOUNTS:-}"
 # ---- end adjust-here block
 
 # Rank map, fixed by the batch contract. Coordination (Gloo/TCPStore/master-addr/ssh) is the
@@ -202,6 +217,37 @@ PORT="${PORT:-8000}"
 # a 63 GiB-per-rank load is an expensive way to learn something. Then retest with
 # EAGER= to claim the throughput back, and record both numbers.
 EAGER="${EAGER---enforce-eager}"
+
+# SPEC and KV_DTYPE are the two engine flags TP=3 adds that the proven TP=2 config never
+# carried, which makes them the first things to bisect when a load fails. MTP pulls in
+# layer 45, and on THIS checkpoint layer 45 is the FP8 block-quantized group rather than
+# NVFP4, so it exercises a quantization path the other 42 expert layers never touch.
+#   SPEC=           disable speculative decoding entirely
+#   KV_DTYPE=auto   BF16 KV, exactly what TP=2 used
+# No surrounding single quotes on the JSON: this is expanded unquoted so the shell splits it
+# NEVER put a brace-containing default inside ${VAR-default}: bash ends the expansion at the
+# first unescaped }, so the JSON's own closing brace terminates it and the remaining } is
+# appended as literal text. With SPEC set empty that produced SPEC=} and vLLM died on
+# "unrecognized arguments: }". Build the default separately.
+SPEC_DEFAULT='--speculative-config {"method":"mtp","num_speculative_tokens":4}'
+
+# Both of these now DEFAULT to the proven TP=2 engine configuration rather than to the
+# published recipe's, because TP=2 is the only configuration of this checkpoint that has
+# ever actually served on this hardware, and it deliberately carried neither.
+#
+# fp8_e4m3 KV is opt-in, not default: no GLM checkpoint ships KV scaling factors, so fp8 KV
+# runs at vLLM's unit scale of 1.0. That silent substitution is a quality variable, and
+# docs/checkpoint-selection.md already refused to carry it into the TP=2 bring-up. The same
+# reasoning applies here, and more so, since TP=3 on compressed-tensors is unproven.
+#
+# MTP is opt-in because it pulls in layer 45, which on THIS checkpoint is the FP8
+# block-quantized group rather than NVFP4, exercising a quantization path the other 42
+# expert layers never touch. Carrying it into a first boot conflates two unknowns.
+#
+# Set SPEC="$SPEC_DEFAULT" and KV_DTYPE=fp8_e4m3 to re-add them as controlled changes once
+# the base loads and passes the fidelity gate, and record a measurement for each.
+SPEC="${SPEC-}"
+KV_DTYPE="${KV_DTYPE:-auto}"
 # -------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------- preflight: everything the
@@ -284,6 +330,8 @@ docker run --gpus all -d \
   -v "$PATCH:$VLLM_PKG/model_executor/layers/sparse_attn_indexer_kpool.py:ro" \
   -v "$PLUGIN_DIR:/opt/nccl-mesh:ro" \
   -v "$CACHE_HOST:/cache" \
+  $EXTRA_MOUNTS \
+  $EXTRA_ENV \
   -e VLLM_HOST_IP="$HOST_IP" \
   -e HF_HOME=/cache/huggingface \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
@@ -311,8 +359,8 @@ docker run --gpus all -d \
     --max-num-seqs 6 \
     --block-size 2304 \
     --moe-backend marlin \
-    --kv-cache-dtype fp8_e4m3 \
-    --speculative-config '{"method":"mtp","num_speculative_tokens":4}' \
+    --kv-cache-dtype "$KV_DTYPE" \
+    $SPEC \
     --hf-overrides "$HF_OVERRIDES" \
     --mm-encoder-tp-mode data \
     $EAGER \
