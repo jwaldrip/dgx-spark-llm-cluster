@@ -293,6 +293,24 @@ KV_DTYPE="${KV_DTYPE:-fp8_e4m3}"
 # model's per-token cost. Buy the headroom.
 GMU="${GMU:-0.80}"
 
+# The admission cap is DERIVED from the KV pool and the observed prompt-length
+# distribution, never picked by hand. Picking it by hand is what caused a 538-preemption
+# thrash earlier on this cluster: a cap of 4 against a pool that held 4.23 mean-sized
+# prompts put 94% of KV in flight and the engine spent its time evicting and recomputing.
+#
+# Current pool is 2,848,560 tokens. Observed main-lane mean prompt is 122,835 tokens, so
+# 23 fit. Half of that is the cap, which leaves real slack for the tail: the p95 prompt is
+# 782,561 tokens and only 3.6 of THOSE fit, so a cap near 23 would thrash the moment
+# several large prompts arrived together. 12 also sits above the observed peak of 9
+# model-active sessions, so it does not throttle real demand.
+#
+# The 6 this inherited from launch-glm-tp2.sh was correct there and wrong here: that pool
+# was 332,475 tokens, where 6 was already above the 2.7 that fit.
+#
+# Re-derive this whenever the pool or the prompt mix changes:
+#   floor((KV tokens / observed mean prompt tokens) / 2)
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-12}"
+
 # FABRIC picks how NCCL crosses the QSFP triangle. Measured on this cluster with a 3-rank
 # bf16 all-reduce, both correct (0 mismatched elements of 2^20):
 #
@@ -431,7 +449,7 @@ docker run --gpus all -d \
     --tensor-parallel-size 3 \
     --gpu-memory-utilization "$GMU" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --max-num-seqs 6 \
+    --max-num-seqs "$MAX_NUM_SEQS" \
     --block-size 2304 \
     --moe-backend marlin \
     --kv-cache-dtype "$KV_DTYPE" \
