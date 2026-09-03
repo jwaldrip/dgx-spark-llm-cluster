@@ -348,5 +348,13 @@
       "any mix under ~1.45M total context tokens",
       "9-session bursts only work if total context stays under ~1.45M (i.e. ~160K each)"
     ]
+  },
+  "admission_control": {
+    "mechanism": "providers.maxInFlightRequests = {spark-glm: 4}. The provider-inflight lease dir (~/.omp/run/provider-inflight/) is the queue: requests beyond the cap have their lease withheld and WAIT. Verified behavior this session: queueing, never errors, never falls back to cloud. So sessions and subagents wait in line until a slot frees.",
+    "derivation": "1.45M resident-token budget (measured: cliff between 55% and 69% of the 2.65M pool) / 365K mean main-lane call = 3.97 -> 4.",
+    "scope": "GLOBAL across every OMP process (proven via multi-PID leases), so subagent fan-out inherits the same gate automatically. No per-role split exists: the cap is per provider, and main + task agents share the spark-glm provider.",
+    "tradeoff_stated": "The cap counts CALLS, not tokens. Child-lane calls average ~157K, so a child-heavy moment uses only ~630K of the 1.45M budget (43%) \u2014 conservative, deliberately. The alternative (token-aware admission) does not exist in config; see plugin_finding.",
+    "plugin_finding": "No existing pi/omp plugin does admission control. The extension API events are session_start, session_shutdown, tool_call, tool_result, mcp_notification \u2014 there is NO llm-request event, so a plugin cannot intercept provider calls. The upgrade path if call-count proves too blunt: extend router/gateway.ts (already in repo) to admit by context-token budget instead of request count, and point spark-glm at it. Deferred: deploying the router mid-trial would change the availability measurement; also a router that returns 503 instead of queueing would trigger cloud fallback, so it must queue.",
+    "priority_note": "The cap cannot prioritize interactive sessions over subagents; both wait in one FIFO. If that bites, the router is the place to add priority."
   }
 }
