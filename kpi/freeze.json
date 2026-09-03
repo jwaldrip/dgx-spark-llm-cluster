@@ -356,5 +356,18 @@
     "tradeoff_stated": "The cap counts CALLS, not tokens. Child-lane calls average ~157K, so a child-heavy moment uses only ~630K of the 1.45M budget (43%) \u2014 conservative, deliberately. The alternative (token-aware admission) does not exist in config; see plugin_finding.",
     "plugin_finding": "No existing pi/omp plugin does admission control. The extension API events are session_start, session_shutdown, tool_call, tool_result, mcp_notification \u2014 there is NO llm-request event, so a plugin cannot intercept provider calls. The upgrade path if call-count proves too blunt: extend router/gateway.ts (already in repo) to admit by context-token budget instead of request count, and point spark-glm at it. Deferred: deploying the router mid-trial would change the availability measurement; also a router that returns 503 instead of queueing would trigger cloud fallback, so it must queue.",
     "priority_note": "The cap cannot prioritize interactive sessions over subagents; both wait in one FIFO. If that bites, the router is the place to add priority."
+  },
+  "subagent_concurrency_cap": {
+    "setting": "task.maxConcurrency 64 -> 6",
+    "why_6": "Worst realistic mix (1 main-lane 365K + 5 child-lane 157K = 1.15M) stays under the 1.45M residency budget even without the admission gate. All-child is 942K. At 64, KV was already protected by the admission cap, but queue depth made interactive turns wait behind long subagent call queues.",
+    "division_of_labor": [
+      "providers.maxInFlightRequests=4: protects the KV pool (tokens in flight, global across processes, queues without falling back)",
+      "task.maxConcurrency=6: protects queue depth and latency (per-parent; subagents finish sooner instead of round-robining, interactive calls face shorter lines)"
+    ],
+    "honest_limits": [
+      "task.maxConcurrency is per parent process, not global: 3 OMP sessions each get 6. The admission gate remains the only global backstop \u2014 which is fine, it is the one that protects KV.",
+      "Big parallel batches now run in waves of 6. Fan-out-heavy workflows (the task tool's batch shape) complete later wall-clock but each subagent finishes faster.",
+      "Running OMP processes may hold the old value until restarted; new sessions get 6."
+    ]
   }
 }
