@@ -269,5 +269,29 @@
     },
     "practical_answer": "The lever is not hardware, it is the workload shape. Cap concurrent sessions at 3-4 on TP=3 (98.6% hit, 17.5s follow-ups, this hardware is excellent there) or accept cold re-prefill on every turn beyond the cliff. A fourth node buys margin to ~5-6 sessions, not coverage of the 9-session peak.",
     "action": "queued: 4/5-session arms to locate the cliff, and 6/9-session arms at 175K to test whether halving context doubles usable sessions (it should if the cliff is capacity-bound)."
-  }
+  },
+  "contaminated_windows": [
+    {
+      "window_utc": [
+        "2026-09-03T07:50:00Z",
+        "2026-09-03T09:45:00Z"
+      ],
+      "what": "eviction experiment arms 3/6/9 at 365K - ~6.5M cold-prefix tokens, deliberate cache-hostile nonces"
+    },
+    {
+      "window_utc": [
+        "2026-09-03T09:50:00Z",
+        "2026-09-03T12:30:00Z"
+      ],
+      "what": "cliff-locating arms 4/5 at 365K, same character (end time = expected completion, truncate if the process exits early)"
+    },
+    {
+      "window_utc": [
+        "2026-09-03T06:30:00Z",
+        "2026-09-03T07:45:00Z"
+      ],
+      "what": "bring-up: needle probes at 790K plus load tests at cap 6 and 12"
+    }
+  ],
+  "kpi_analysis_rule": "hitrate.py intervals falling inside any contaminated window are EXCLUDED from the weekly verdict. Warm-wave hits from my experiments are fine to exclude too: the KPI measures HIS workload, not mine."
 }
