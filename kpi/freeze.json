@@ -293,5 +293,13 @@
       "what": "bring-up: needle probes at 790K plus load tests at cap 6 and 12"
     }
   ],
-  "kpi_analysis_rule": "hitrate.py intervals falling inside any contaminated window are EXCLUDED from the weekly verdict. Warm-wave hits from my experiments are fine to exclude too: the KPI measures HIS workload, not mine."
+  "kpi_analysis_rule": "hitrate.py intervals falling inside any contaminated window are EXCLUDED from the weekly verdict. Warm-wave hits from my experiments are fine to exclude too: the KPI measures HIS workload, not mine.",
+  "live_traffic_priority": {
+    "stated": "2026-09-03 ~10:05Z: 'I am using these models right now - make sure we take that into account.'",
+    "action_taken": "Stopped the cliff-locating experiment mid-run (10m46s in, during the 4-session cold wave). No experiment restarts while the endpoint is serving real sessions.",
+    "why_it_matters": "Each experimental arm saturates the same admission cap and KV pool his live sessions use. An arm running during his peak would have queued his real turns behind 3.65M tokens of synthetic prefill - potentially ~50 minutes of added latency for the session he is in right now.",
+    "contamination_note": "The stopped 4-session arm injected ~1.4M cold-prefix tokens before stopping. Its window is already covered by the contaminated_windows entry (09:50-12:30Z); no further marking needed.",
+    "rule_going_forward": "Before any future synthetic run: check num_requests_running > 0 or recent real traffic, and defer if the endpoint is in use. Experiments wait for idle engines; live work does not wait for experiments.",
+    "what_still_stands": "The completed 3/6/9 results are unaffected - they ran when the engine was idle, verified by running_at_start=0 in every arm, and their verdicts (eviction cliff at 40-80% of pool, 3-4 effective sessions on TP=3) stand."
+  }
 }
