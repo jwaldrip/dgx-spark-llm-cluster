@@ -223,5 +223,20 @@
     ],
     "verdict": "Not a one-off. gemini-3.8-flash reliably fails long-context retrieval at his p95 while local GLM returns the exact string. The failure is silent: a successful response with a wrong answer, which never triggers fallback. This is the strongest single argument for keeping the p95 lane local, and it justifies the chain reorder that put opus ahead of gemini.",
     "cost_of_being_wrong": "$0.59 per wrong answer, and no error surfaced to the caller."
+  },
+  "cache_floor_finding": {
+    "discovered_while": "validating my own eviction discriminator, which read warm_hit 0.0 and would have 'proved' total eviction from a 4,000-word smoke test",
+    "rule": "the final ~2-3 blocks of 2,304 tokens (~4.6-6.9K tokens) are never committed to the prefix cache. A prompt at or below that tail caches NOTHING.",
+    "evidence": [
+      " 8,015 tok = 3.48 blocks -> 0 cached, warm repeat 0.0% hit",
+      "30,014 tok = 13.03 blocks -> 23,040 cached (10 blocks), warm repeat 76.8%",
+      "120,016 tok = 52.09 blocks -> 115,200 cached (50 blocks), warm repeat 96.0%"
+    ],
+    "why_it_matters": "At his real sizes the tail costs 5.8% at 120K, 2.0% at 351K, 0.9% at 782K, so it is negligible for the workload. But it invalidates any cache measurement taken with small prompts, and the natural warm-turn hit rate at realistic size is ~96%, matching the cloud-era 96.8% almost exactly. That is strong evidence the local 90.3% LIFETIME figure is depressed by cold first-calls, NOT by eviction.",
+    "latency_effect": "120K cold 64.6 s -> warm 3.6 s, an 18x saving on the repeat.",
+    "instrument_faults_found_and_fixed": [
+      "prompt_tokens_details is null on this build, so per-request cached_tokens does not exist; the first version of the script read a constant 0.0 and looked like total eviction.",
+      "the prefix-cache counters flush a scheduler step behind the HTTP response, so an immediate scrape attributed each wave's hits to the NEXT window and reported cold 0.83 / warm 0.00, exactly inverted. Fixed with a settle delay and validated against a known-good repeat."
+    ]
   }
 }
