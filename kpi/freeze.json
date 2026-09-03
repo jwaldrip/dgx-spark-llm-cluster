@@ -1,0 +1,227 @@
+{
+  "trial": "local-glm-tp3-week1",
+  "frozen_at_utc": "2026-09-03T07:02:00Z",
+  "note": "Availability clock starts at freeze. The five node wedges during bring-up were operator-induced (stacked allocations, relaunches mid-load, flag iteration) and are NOT evidence about steady-state availability. Only events after this timestamp count toward the trial.",
+  "engine_started_utc": {
+    "r0": "2026-09-03T06:30:39Z",
+    "r1": "2026-09-03T06:30:59Z",
+    "r2": "2026-09-03T06:31:19Z"
+  },
+  "restart_count_at_freeze": {
+    "r0": 0,
+    "r1": 0,
+    "r2": 0
+  },
+  "docker_restart_policy": "no",
+  "launcher_sha256_prefix": "369b242a92768431",
+  "padded_config_sha256_prefix": "e12fa81b7fc2ebcc",
+  "kv_cache_tokens": 2653279,
+  "config": {
+    "checkpoint": "LibertAIDAI/GLM-5.3-Flash-NVFP4@caca4e6a",
+    "tp": 3,
+    "max_model_len": 1048576,
+    "kv_dtype": "fp8_e4m3",
+    "spec": "mtp/4",
+    "compiled": true,
+    "gmu": 0.8,
+    "max_num_seqs": 12,
+    "max_num_batched_tokens": 16384,
+    "fabric": "nvidia subnet-aware IB, no plugin"
+  },
+  "roles_pointed_at_local": 12,
+  "fallback_chain": [
+    "opencode-go/glm-5.3-flash",
+    "google-antigravity/gemini-3.8-flash",
+    "anthropic/claude-opus-5"
+  ],
+  "chain_rules": [
+    "one model per provider",
+    "no same-provider hops",
+    "only opencode-go, anthropic, google-antigravity retained"
+  ],
+  "known_chain_caveat": "gemini-3.8-flash tops out at thinking=high, with no max. The plan, slow and security roles request :max, so that rung serves them one level down. opencode-go/glm-5.3-flash ahead of it has the identical low/high/max ladder, and anthropic behind it has max.",
+  "freeze_rules": [
+    "no config changes on the nodes",
+    "no relaunches",
+    "no experiments on these nodes",
+    "repo and docs edits are fine, they do not touch serving"
+  ],
+  "client_concurrency": {
+    "providers.maxInFlightRequests": {
+      "spark-glm": 12,
+      "ollama": 1
+    },
+    "scope": "GLOBAL across all OMP processes on this config root, not per session. Proven by inspecting ~/.omp/run/provider-inflight/<provider>/, which held four concurrent lease directories named <pid>-<ts>-<uuid> from three distinct PIDs, coordinated by sibling .lock dirs and .wakeup files.",
+    "why_12": "Matches the server's --max-num-seqs 12 so there is ONE authority on concurrency. Raised from 2, which was derived correctly for the old TP=2 pool of 332,475 tokens (2.7 mean prompts fit) and never revisited when the pool grew to 2,653,279 (21.6 fit). At 2 it was throttling 4-10 sessions through a 6x bottleneck, and every load test I ran bypassed OMP so it never showed up.",
+    "if_it_had_been_per_process": "12 x 9 sessions = 108 in flight against a 12-seat server, which is the over-subscription that produced 538 preemptions earlier in this project. Verified it is not."
+  },
+  "saturation_behaviour": {
+    "on_exceeding_cap": "queues; does NOT error; does NOT fall back to opencode-go",
+    "why": "retry.fallbackChains fires on ERRORS. vLLM queues past --max-num-seqs rather than rejecting, and the OMP client cap withholds a lease rather than failing. Saturation therefore appears as latency, not as spillover.",
+    "timeout_risk": "tools.maxTimeout is 0 (uncapped) and retry.maxDelayMs is 300000, so a deeply queued request waits rather than failing fast.",
+    "how_to_get_real_spillover": "router/gateway.ts returns 503 once every replica is at maxInflight, and a 503 is an error, so it would trigger the chain and spill to opencode-go. Not deployed; deploying it mid-trial would invalidate the availability measurement."
+  },
+  "provider_economics": {
+    "promo_expiry": {
+      "date_utc8": "2026-09-09T24:00+08:00",
+      "impact": "Falls INSIDE the trial window that began 2026-09-03. Any cost figure measured this week is at promo rates and expires mid-measurement. Report list rates.",
+      "promo_triple": {
+        "input": 0.075,
+        "cached_input": 0.015,
+        "output": 0.25
+      },
+      "list_triple": {
+        "input": 0.15,
+        "cached_input": 0.03,
+        "output": 0.5
+      },
+      "projected_main_lane_monthly": {
+        "promo_uncached": 23.07,
+        "promo_cached": 6.71,
+        "list_uncached": 46.15,
+        "list_cached": 13.43
+      },
+      "inference": "opencode-go lists exactly the promo triple, so it is likely reselling it and may double on Sep 9. UNVERIFIED, query out to ProviderEconomics.",
+      "comparison": "frontier API overage remains ~$1,561/mo, so cost is still not the deciding axis even at list."
+    },
+    "open_disqualifiers": [
+      "opencode-go data retention / training use: unknown. If it retains or trains on prompts it is disqualified for client work at any price and the chain needs reordering immediately, not after the trial.",
+      "opencode-go effective context: catalog claims 1,000,000 but unverified in practice. p95 is 782,561 and max 908,183. A provider that advertises 1M and truncates lower would fail precisely the turns the cluster exists for, and fail them silently.",
+      "GMICloud retains prompts per OpenRouter's provider-policy API; Z.AI, DeepInfra, Novita, Together, Fireworks, Parasail and Modal are zero-retention at the same promo price."
+    ]
+  },
+  "p95_rung_probe": {
+    "prompt": "one real needle-in-haystack, 790,455 local tokens / 763,488 as billed by cloud rungs",
+    "matrix": {
+      "spark-glm local (through OMP, not curl)": {
+        "accepted": true,
+        "input_tokens": 800349,
+        "answer": "7f4c19ae-QUARTZ-882 EXACT",
+        "cost_usd": 0.0,
+        "wall_s": 538,
+        "note": "cold prefill. warm repeat of the same prompt was 9 s. no compaction, no fallback."
+      },
+      "opencode-go/glm-5.3-flash": {
+        "accepted": false,
+        "answer": null,
+        "note": "retry_fallback_applied fired. 1M is a vendor claim; proven ceiling 421,153."
+      },
+      "google-antigravity/gemini-3.8-flash": {
+        "accepted": true,
+        "answer": "WRONG - wrote an essay, needle not found",
+        "cost_usd": 0.590166,
+        "note": "763,488 was INSIDE its documented 1,048,576 input limit, so this was a long-context CAPABILITY failure, not truncation. Also caps output at 65,536, half of Opus."
+      },
+      "anthropic/claude-opus-5": {
+        "accepted": null,
+        "answer": null,
+        "note": "INVALID PROBE, not a model failure. Claude's tokenizer emits ~30% more tokens, so 763K GLM tokens approaches its 1M ceiling; OMP auto-compaction fired at threshold, could not reduce a single turn, and the turn returned empty with 0 tokens. His ledger already shows a 1,005,917-token opus turn, so ~1M works on real traffic."
+      }
+    },
+    "conclusion": "At p95 sizes LOCAL is the only arm that both accepts the turn and answers it correctly. That is the strongest measured justification for the cluster.",
+    "caveats": [
+      "n=1 on the gemini quality failure.",
+      "cold p95 prefill through OMP is ~9 minutes; only the warm path is 9 s.",
+      "opus has little headroom at his largest turns because of tokenizer inflation."
+    ]
+  },
+  "chain_reorder": {
+    "at_utc": "2026-09-03T07:27:00Z",
+    "from": [
+      "opencode-go/glm-5.3-flash",
+      "google-antigravity/gemini-3.8-flash",
+      "anthropic/claude-opus-5"
+    ],
+    "to": [
+      "opencode-go/glm-5.3-flash",
+      "anthropic/claude-opus-5",
+      "google-antigravity/gemini-3.8-flash"
+    ],
+    "why": "gemini returned a wrong-but-successful answer at p95, which does NOT trigger fallback, so it was shielding opus from ever seeing the turns only opus can serve. Ordered by capability rather than price. Opus is the only cloud rung empirically proven above his p95 (1,005,917-token turn in his own ledger), has no long-context surcharge, and carries the strongest terms (no training, Customer Content designated Confidential).",
+    "privacy": "Reorder IMPROVES posture. Antigravity routes via Cloud Code Assist and its paid status is unverified; the Unpaid Gemini terms permit human review and say plainly not to submit confidential information.",
+    "cost_exposure": "Opus is ~28x opencode-go per fallback turn ($0.1385 vs $0.00497 at his mean 147,855-token turn). The last 8-day fallback burst would have been ~$325 instead of $11.69. Acceptable ONLY while fallback stays rare, which makes local uptime the real KPI.",
+    "rules_verified": "zero same-provider hops, one model per provider, only the four kept providers"
+  },
+  "CORRECTION_volume_and_capacity": {
+    "what_i_got_wrong": "Every cost figure I quoted this session used 302M input tokens/month, derived from 82 main-lane turns/day x 122,835 mean prompt tokens. That counts one prompt per TURN. Billing is per API CALL, and each call re-sends the whole grown context. Measured from 490,104 calls over 27 days in ~/.omp/stats.db the real figure is 101.7B prompt tokens/month. I was wrong by 337x.",
+    "verified_independently": "prompt:output 547:1 and cacheRead 97.1% of prompt tokens, both reproduced by direct query, matching WorkloadBaseline's 547:1 and 96.8%. The 181:1 ratio I had been using is not reproducible from the corpus.",
+    "corrected_monthly_cost": {
+      "local_marginal": 0,
+      "opencode_go_list": 3302,
+      "gemini_3_8_flash": 10341,
+      "gpt_5_6_sol_api": 69872,
+      "claude_opus_5": 68943
+    },
+    "cost_verdict": "COST NOW STRONGLY FAVOURS LOCAL, the opposite of what I told him. I said 'cloud-hosted GLM is roughly $30/month, which undercuts cost as a justification'. It is $3,302/month. ~$12k of hardware pays back against cloud GLM in 3.6 months and against frontier API rates in 5 days.",
+    "capacity_verdict": "BUT the cluster cannot serve this volume. Three independent methods agree: prefill-only 307% of a month, aggregate-throughput 375%, generation-only 91%. Local can carry roughly 27% of his measured workload; ~73% must spill.",
+    "consequences": [
+      "Fallback rate cannot be near zero. It is structurally ~73%, so the headline KPI I defined will measure capacity shortfall rather than reliability.",
+      "opencode-go is unusable as that rung: the spill alone is ~$2,422/mo against a $15 allowance that blocks by default. The metered rung must be Z.ai direct or DeepInfra at the same $0.15/$0.03 list, with no cliff.",
+      "GLM emits MORE calls per turn than sol (19.5 vs 11.5 in a paired same-session comparison), so migrating work onto GLM increases token volume rather than reducing it.",
+      "The 4th node, and probably more than one, is now a capacity requirement rather than a throughput nicety."
+    ],
+    "assumptions_stated": [
+      "local prefix-cache hit rate 90.3% measured lifetime; at cloud's observed 97.1% the prefill duty cycle falls to 92%, still saturated.",
+      "prefill 1,240 tok/s and aggregate 1,033 tok/s are this cluster's own gated measurements.",
+      "historical volume was produced under effectively unmetered cloud capacity; if he throttles subagent fan-out the requirement drops, but that is a behaviour change, not a capacity fix."
+    ]
+  },
+  "capacity_audit_result": {
+    "audited_by": "WorkloadBaseline, adversarially, at my request; I reproduced every figure",
+    "my_27pct_was_pessimistic": "I counted cacheWrite as local prefill (double-counts ~1.3%; local records zero cacheWrite on all 1,170 calls) and I priced the advisor as live when it is already disabled. Corrected range reproduces theirs exactly.",
+    "denominator_sound": "error-stop calls are 3.1% of calls but 0.04% of prompt volume (they fail before prefill); fallback re-sends 0.3-0.4%; compaction re-prefills smaller and recurs locally. Total corrections <=1%, not a 30% term.",
+    "servable_share": {
+      "advisor_on_H90.3": "33%",
+      "advisor_off_H90.3": "48%",
+      "advisor_on_H96.8": "99%",
+      "advisor_off_H96.8": "100%"
+    },
+    "THE_REAL_CONSTRAINT": "Not throughput. It is KV capacity driving the prefix-cache hit rate. Per-call prompt averages 351K, so the 2.65M pool holds 7.6 concurrent sessions against his 9-session peak. The top of the range evicts, which is precisely why local measures 90.3% hit while the same workload ran 96.8-97.2% on cloud. Hit rate is not a model property here, it is a capacity symptom, and recompute scales as (1-H): 90.3%->96.8% cuts prefill 3x.",
+    "config_matrix_advisor_off": {
+      "TP=3 now (MTP, fp8)": {
+        "kv_sessions": 7.6,
+        "prefill_duty": "210%",
+        "gen_duty": "62%",
+        "verdict": "OVER"
+      },
+      "TP=3 drop MTP for KV": {
+        "kv_sessions": 10.2,
+        "prefill_duty": "69%",
+        "gen_duty": "90%",
+        "verdict": "OK, tight"
+      },
+      "TP=4 matched (MTP, fp8)": {
+        "kv_sessions": 11.0,
+        "prefill_duty": "69%",
+        "gen_duty": "62%",
+        "verdict": "OK"
+      }
+    },
+    "recommendation": "Four MATCHED nodes. On TP=3 you must choose which constraint to break: MTP costs 913K KV tokens but buys 1.45x generation. TP=4 breaks neither and leaves +22% KV margin over his measured peak. Matched units also avoid the documented NVIDIA forum risk of mixing DGX Spark FE with ASUS Ascent, which degrades the RDMA fabric the whole TP design rests on.",
+    "KPI_REDEFINED": "Fallback rate was the wrong headline; it would have measured capacity shortfall as unreliability. The headline is now PREFIX-CACHE HIT RATE AS A FUNCTION OF CONCURRENT SESSIONS. The collector already records prefix_cache_queries/hits and kv_cache_usage_perc every 5 minutes, so the week tests the eviction hypothesis directly: if H stays near 96.8% at 9 sessions the cluster is sufficient at TP=3; if it degrades toward 90.3% the fourth node is required, not optional.",
+    "quota_arm_disqualified": "512 codex primary polls: 343 ok / 56 warning / 113 exhausted. All 113 carry a SERVER-ISSUED resets_at, which a transport failure cannot fabricate, and the streaks are full-day (18/18, 16/16, 24/24, 24/24, 15/15) with same-day transcript spikes of 111/59/205/120/172 usage-limit errors. Genuine exhaustion, verified against my own failed-probe trap.",
+    "reporting_gap": "OMP records the local endpoint's cacheRead as zero while TTFT arithmetic implies a 92.8% effective hit. Use the cluster's own counters for KPIs, never OMP's."
+  },
+  "kpi_data_hygiene": {
+    "clean_from_utc": "2026-09-03T07:45:00Z",
+    "why": "Every row before this is CONTAMINATED by my own bring-up traffic: three cold 790K needle probes with unique nonces (deliberately cache-hostile), plus concurrent load tests at cap 6/12. Those depress the hit rate and must not be read as workload data.",
+    "sampling_cadence": "raised from 5 min to 1 min. A 5-minute instantaneous gauge would almost never catch a 9-session peak, so the KPI's concurrency label was a very loose lower bound. 1 min narrows it; it does not eliminate the gap.",
+    "first_signal_and_its_caveat": {
+      "observed": "H falls 97.5% at 1 session -> 93.8% at 3 -> 73.9% at 4 (9 intervals only)",
+      "but": "kv_cache_usage_perc is only 23.7% at 4 sessions, so EVICTION CANNOT BE THE CAUSE at that concurrency. The likelier mechanism is prefix DIVERSITY: concurrent distinct sessions share no prefix, and each new session's first call is a cold miss.",
+      "consequence": "This partially undercuts my four-node recommendation. More KV fixes eviction; it does not fix prefix diversity. If H degrades with concurrency while KV sits at a quarter full, a fourth node buys margin but not hit rate, and the 33-47% servable share would not improve. The mechanism must be separated before spending on hardware."
+    },
+    "what_would_settle_it": "Run to >=7 concurrent sessions and read kv_cache_usage_perc at the same time. High concurrency WITH high KV usage and falling H = eviction, fourth node helps. High concurrency with LOW KV usage and falling H = prefix diversity, fourth node does not help and the answer is session affinity or fewer, longer-lived sessions."
+  },
+  "gemini_p95_capability": {
+    "n": 3,
+    "prompt": "identical 763,488-token needle, unique nonce",
+    "results": [
+      "run1 WRONG - markdown essay on PebblesDB, needle absent",
+      "run2 WRONG - answer about Kafka KRaft protocol, needle absent",
+      "run3 To find the smallest value of $x$ such that the function \n$$f(x) = |x "
+    ],
+    "verdict": "Not a one-off. gemini-3.8-flash reliably fails long-context retrieval at his p95 while local GLM returns the exact string. The failure is silent: a successful response with a wrong answer, which never triggers fallback. This is the strongest single argument for keeping the p95 lane local, and it justifies the chain reorder that put opus ahead of gemini.",
+    "cost_of_being_wrong": "$0.59 per wrong answer, and no error surfaced to the caller."
+  }
+}
