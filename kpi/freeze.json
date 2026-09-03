@@ -301,5 +301,52 @@
     "contamination_note": "The stopped 4-session arm injected ~1.4M cold-prefix tokens before stopping. Its window is already covered by the contaminated_windows entry (09:50-12:30Z); no further marking needed.",
     "rule_going_forward": "Before any future synthetic run: check num_requests_running > 0 or recent real traffic, and defer if the endpoint is in use. Experiments wait for idle engines; live work does not wait for experiments.",
     "what_still_stands": "The completed 3/6/9 results are unaffected - they ran when the engine was idle, verified by running_at_start=0 in every arm, and their verdicts (eviction cliff at 40-80% of pool, 3-4 effective sessions on TP=3) stand."
+  },
+  "queued_experiments": {
+    "launched_after": "user confirmed all sessions paused; 10-minute wait then run",
+    "arm_1": "4,5 sessions x 350K words (locate cliff)",
+    "arm_2": "6,9 sessions x 175K words (context-halving lever test)",
+    "contamination_window_to_record": "will stamp actual start/end into contaminated_windows when run"
+  },
+  "cliff_location": {
+    "arms_4_5_at_full_context": [
+      {
+        "sessions": 4,
+        "pct_pool": "55%",
+        "warm_hit": "89.1%",
+        "warm_wall_s": 101.8
+      },
+      {
+        "sessions": 5,
+        "pct_pool": "69%",
+        "warm_hit": "45.0%",
+        "warm_wall_s": 577.3
+      }
+    ],
+    "cliff_located": "between 4 (89.1% hit, 102s turn) and 5 sessions (45.0%, 577s). So TP=3 comfortably serves 3-4 sessions of his mean context; the 5th session is where it breaks.",
+    "context_halving_test": [
+      {
+        "sessions": 6,
+        "words": 175000,
+        "pct_pool": "41%",
+        "warm_hit": "96.0%",
+        "warm_wall_s": 31.0
+      },
+      {
+        "sessions": 9,
+        "words": 175000,
+        "pct_pool": "62%",
+        "warm_hit": "53.9%",
+        "warm_wall_s": 407.0
+      }
+    ],
+    "halving_verdict": "CONFIRMED - the cliff is capacity-bound and scales with total tokens, not session count. At half context, 6 sessions behave like 3 did at full (96.0% vs 98.6% hit, 31s vs 18s turns). 9 sessions at half context (62% of pool) still degrades (53.9%) because 62% sits inside the measured collapse zone.",
+    "practical_rule": "what matters is TOTAL CONTEXT TOKENS ACROSS CONCURRENT SESSIONS, not sessions. The pool tolerates roughly 1.4-1.5M tokens of resident context (55-69% of its 2.65M nominal). Stay under that and turns are 18-31s; cross it and follow-ups cost 10-32x more.",
+    "action_options": [
+      "3-4 full-context sessions, or",
+      "up to 6 half-context sessions, or",
+      "any mix under ~1.45M total context tokens",
+      "9-session bursts only work if total context stays under ~1.45M (i.e. ~160K each)"
+    ]
   }
 }
