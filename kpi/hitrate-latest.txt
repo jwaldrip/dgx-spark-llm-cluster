@@ -1,0 +1,26 @@
+rows=251 usable=163 excluded=88 engine_restarts=0
+
+concurrency is a LOWER BOUND (see module docstring)
+
+sessions intervals        queries  hit rate  kv used  recompute vs H=96.8%
+----------------------------------------------------------------------------
+       1        32    7,769,413.0    70.6%    6.5%                 9.19x
+       2        36   11,306,868.0    52.2%   13.1%                14.94x
+       3         4    1,109,351.0    28.2%   25.0%                22.42x
+       4         3      989,094.0    23.3%   17.3%                23.97x
+       5         3      782,204.0     0.0%   27.4%                31.25x
+       6         6    1,700,178.0     3.5%   28.3%                30.15x
+       7         1      364,592.0     0.0%   53.0%                31.25x
+----------------------------------------------------------------------------
+     all        85   24,021,700.0    49.9%
+
+Verdict on the eviction hypothesis:
+  H at <=3 sessions: 58.0%
+  H at >=7 sessions: 0.0%   (delta -58.0%)
+  DEGRADES under load. Recompute rises 2.38x.
+  The eviction experiment measured this precisely: the cliff sits between
+  41% and 82% of the nominal pool, i.e. ~3-4 concurrent sessions of his
+  365K mean context on TP=3. TP=4 extends the cliff to ~5-6 sessions; it
+  does NOT cover the 9-session peak (that needs ~6M tokens, ~TP=7).
+  Action: cap concurrent sessions at 3-4, or accept cold re-prefill above
+  the cliff. A single extra node buys margin, not peak coverage.

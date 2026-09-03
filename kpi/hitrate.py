@@ -22,6 +22,7 @@ bucket label is a LOWER BOUND on true concurrency during that interval. Denser
 sampling narrows this; it does not eliminate it.
 """
 import json
+import datetime
 import os
 import sys
 from collections import defaultdict
@@ -41,6 +42,54 @@ def rows(path):
                 continue  # a torn final line while cron is mid-write
 
 
+def contaminated_windows():
+    """Windows that must never count toward the KPI, from freeze.json.
+
+    Two kinds land here: bring-up and probe traffic (deliberately cache-hostile
+    cold nonces), and synthetic experiment arms (saturating prefill). My own
+    eviction experiments injected ~8M cold-prefix tokens after the 'clean'
+    marker; without this exclusion the weekly verdict would read my probes as
+    his workload and understate the hit rate.
+    """
+    for p in ("~/.omp/kpi/freeze.json", os.path.join(os.path.dirname(os.path.abspath(__file__)), "freeze.json")):
+        fp = os.path.expanduser(p)
+        if os.path.exists(fp):
+            try:
+                return json.load(open(fp)).get("contaminated_windows", []), fp
+            except json.JSONDecodeError:
+                pass
+    return [], None
+
+
+def row_ts(row):
+    """Row timestamp as epoch seconds. The collector writes ISO-8601 'ts'
+    (e.g. 2026-09-03T06:51:41Z); a bare epoch number is also tolerated."""
+    ts = row.get("ts")
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return ts / 1000 if ts > 1e11 else float(ts)
+    try:
+        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def is_contaminated(row, windows):
+    ts = row_ts(row)
+    if ts is None:
+        return False  # unlabelled rows stay IN: exclusion needs evidence
+    for w in windows:
+        try:
+            lo = datetime.datetime.fromisoformat(w["window_utc"][0].replace("Z", "+00:00")).timestamp()
+            hi = datetime.datetime.fromisoformat(w["window_utc"][1].replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError, IndexError):
+            continue
+        if lo <= ts <= hi:
+            return True
+    return False
+
+
 def counter(row, name):
     return (row.get("counters") or {}).get(name)
 
@@ -54,16 +103,26 @@ def main():
         sys.exit(f"no collector data at {PATH}")
 
     all_rows = list(rows(PATH))
-    # A failed scrape must never read as a quiet interval. Drop it explicitly
-    # rather than letting a null counter difference look like zero traffic.
-    good = [r for r in all_rows if r.get("scrape_ok") and counter(r, "prefix_cache_queries_total") is not None]
-    skipped = len(all_rows) - len(good)
+    windows, wsrc = contaminated_windows()
+    # A failed scrape must never read as a quiet interval, and a contaminated
+    # interval must never read as workload. Both are excluded explicitly.
+    # Keep the original index with each kept row. Pairing zip(good, good[1:])
+    # would bridge an excluded window, attributing everything inside the gap
+    # (e.g. a synthetic experiment's 2.2M cold queries) to one boundary
+    # interval. Only originally-adjacent rows may form an interval.
+    kept = [(i, r) for i, r in enumerate(all_rows)
+            if r.get("scrape_ok")
+            and counter(r, "prefix_cache_queries_total") is not None
+            and not is_contaminated(r, windows)]
+    skipped = len(all_rows) - len(kept)
 
     buckets = defaultdict(lambda: {"q": 0, "h": 0, "n": 0})
     kv_by_bucket = defaultdict(list)
     restarts = 0
 
-    for a, b in zip(good, good[1:]):
+    for (ia, a), (ib, b) in zip(kept, kept[1:]):
+        if ib != ia + 1:
+            continue  # gap: excluded rows between these two; interval unknowable
         dq = counter(b, "prefix_cache_queries_total") - counter(a, "prefix_cache_queries_total")
         dh = counter(b, "prefix_cache_hits_total") - counter(a, "prefix_cache_hits_total")
         if dq < 0 or dh < 0:
@@ -85,12 +144,12 @@ def main():
             kv_by_bucket[key].append(kv)
 
     if not buckets:
-        print(f"rows={len(all_rows)} usable={len(good)} skipped={skipped}")
+        print(f"rows={len(all_rows)} usable={len(kept)} skipped={skipped}")
         print("No interval carried prefix-cache traffic yet. Not a failure: the")
         print("cluster has served no requests between scrapes. Re-run later.")
         return
 
-    print(f"rows={len(all_rows)} usable={len(good)} failed_scrapes={skipped} "
+    print(f"rows={len(all_rows)} usable={len(kept)} excluded={skipped} "
           f"engine_restarts={restarts}\n")
     print("concurrency is a LOWER BOUND (see module docstring)\n")
     print(f"{'sessions':>8} {'intervals':>9} {'queries':>14} {'hit rate':>9} "
@@ -127,7 +186,12 @@ def main():
         print(f"  H at >=7 sessions: {h_hi:.1%}   (delta {h_hi - h_lo:+.1%})")
         if h_hi < h_lo - 0.02:
             print(f"  DEGRADES under load. Recompute rises {(1 - h_hi) / (1 - h_lo):.2f}x.")
-            print("  The fourth node is a capacity requirement, not an upgrade.")
+            print("  The eviction experiment measured this precisely: the cliff sits between")
+            print("  41% and 82% of the nominal pool, i.e. ~3-4 concurrent sessions of his")
+            print("  365K mean context on TP=3. TP=4 extends the cliff to ~5-6 sessions; it")
+            print("  does NOT cover the 9-session peak (that needs ~6M tokens, ~TP=7).")
+            print("  Action: cap concurrent sessions at 3-4, or accept cold re-prefill above")
+            print("  the cliff. A single extra node buys margin, not peak coverage.")
         else:
             print("  HOLDS under load. KV headroom is sufficient at TP=3 for this workload;")
             print("  the fourth node would buy margin, not capability.")
