@@ -238,5 +238,36 @@
       "prompt_tokens_details is null on this build, so per-request cached_tokens does not exist; the first version of the script read a constant 0.0 and looked like total eviction.",
       "the prefix-cache counters flush a scheduler step behind the HTTP response, so an immediate scrape attributed each wave's hits to the NEXT window and reported cold 0.83 / warm 0.00, exactly inverted. Fixed with a settle delay and validated against a known-good repeat."
     ]
+  },
+  "eviction_experiment": {
+    "method": "3/6/9 concurrent synthetic sessions, each a unique 365K prefix (his measured mean context), cold wave then warm wave, per-request and differenced-counter measurement with settle delay. Zero preemptions throughout: pure cache eviction, not queueing.",
+    "results": {
+      "3 sessions (41% of pool)": {
+        "warm_hit": "98.6%",
+        "warm_wall_s": 17.5,
+        "cold_wall_s": 624.6
+      },
+      "6 sessions (82% of pool)": {
+        "warm_hit": "8.0%",
+        "warm_wall_s": 1139.9,
+        "cold_wall_s": 1244.6
+      },
+      "9 sessions (124% of pool)": {
+        "warm_hit": "0.0%",
+        "warm_wall_s": 1920.8,
+        "cold_wall_s": 1881.3
+      }
+    },
+    "verdict": "EVICTED, and it is a CLIFF not a slope. Between 41% and 82% of nominal pool the warm hit collapses 98.6% -> 8.0% -> 0.0%. There is no partial credit: once demand exceeds the pool every prefix is reclaimed, so at 9 sessions a follow-up turn re-prefills all 365K tokens and is SLOWER than the original cold turn (eviction plus contention).",
+    "mechanism_settled": "Eviction, NOT prefix diversity. Diversity would leave warm hits high regardless of pool pressure; they went to exactly zero when demand exceeded it.",
+    "my_earlier_doubt_was_wrong": "I had doubted eviction because kv_cache_usage_perc sat at 23.7% while hit rate fell. That gauge reports ACTIVE usage at scrape time; by then requests have finished and their blocks are freed. It read 6.6% in the very arm where eviction destroyed every prefix. Wrong instrument, third time today.",
+    "effective_capacity": "~3-4 sessions of his mean context on TP=3, not the 7.3 nominal figure. A resident prefix also needs live prefill space, so the cliff sits at 40-80% of pool, not 100%.",
+    "node_answer": {
+      "TP=3 (2.65M)": "covers 3-4 sessions at 365K. His p95 is fine; his concurrency is not.",
+      "TP=4 (3.85M)": "covers ~5-6. Extends the cliff, does not remove it.",
+      "covering 9-session peak": "needs ~6M tokens, roughly TP=7. Not a purchasable unit count."
+    },
+    "practical_answer": "The lever is not hardware, it is the workload shape. Cap concurrent sessions at 3-4 on TP=3 (98.6% hit, 17.5s follow-ups, this hardware is excellent there) or accept cold re-prefill on every turn beyond the cliff. A fourth node buys margin to ~5-6 sessions, not coverage of the 9-session peak.",
+    "action": "queued: 4/5-session arms to locate the cliff, and 6/9-session arms at 175K to test whether halving context doubles usable sessions (it should if the cliff is capacity-bound)."
   }
 }
