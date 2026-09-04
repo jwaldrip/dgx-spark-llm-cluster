@@ -369,5 +369,26 @@
       "Big parallel batches now run in waves of 6. Fan-out-heavy workflows (the task tool's batch shape) complete later wall-clock but each subagent finishes faster.",
       "Running OMP processes may hold the old value until restarted; new sessions get 6."
     ]
+  },
+  "vllm_dashboard": {
+    "installed": "awlx/vllm-dashboard (Apache-2.0), built from source with Go 1.26, tests passed, cross-compiled CGO_ENABLED=0 linux/arm64, deployed to all 3 Spark nodes",
+    "topology": {
+      "agents": "one per node on :9090. rank0 (10.4.1.119) carries the model entry scraping http://127.0.0.1:8000/metrics; ranks 233/191 run empty-model agents (host telemetry only).",
+      "collector": "10.4.1.119:9091 aggregates the three agents into the fleet view"
+    },
+    "verified_live": "running=4 waiting=0 kv=27.4% prefix_hit=88.3% spec_accept=37.5% gpu=94% 66C mem=96.6% \u2014 live from the fleet endpoint, UI HTTP 200",
+    "known_limitations": [
+      "ranks 233/191 show no vLLM metrics in the fleet view because vLLM exposes metrics only on the rank-0 head and the tool is model-centric; their host telemetry is visible only via their own :9090 UIs.",
+      "processes run under setsid+nohup in user space; systemd install skipped (nodes need interactive sudo). vllm-dashboard.service template is ready to install with Restart=on-failure when he can enter a password."
+    ],
+    "access": {
+      "fleet_ui": "http://10.4.1.119:9091",
+      "rank_uis": [
+        "http://10.4.1.119:9090",
+        "http://10.4.1.233:9090",
+        "http://10.4.1.191:9090"
+      ]
+    },
+    "note": "dashboard is independent of the KPI pipeline (which keeps reading vLLM /metrics directly); trial freeze unaffected"
   }
 }
